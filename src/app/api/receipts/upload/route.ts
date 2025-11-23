@@ -2,110 +2,122 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// 1. Inisialisasi Gemini Client
-// Menggunakan API Key dari .env
+// Setup AI
 const genAI = process.env.GEMINI_API_KEY
   ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
   : null;
 
 export async function POST(req: NextRequest) {
   try {
-    console.log("🔵 [Start] Pipeline Upload (Mode: Gemini AI)...");
+    console.log("🔵 [Start] Pipeline Upload...");
 
-    // --- STEP 2.1: FILE HANDLING (KITA PERTAHANKAN) ---
+    // --- STEP 2.1: FILE HANDLING ---
     const formData = await req.formData();
     const file = formData.get("file") as File;
     const auditorAddress = formData.get("auditorAddress") as string;
 
-    // Validasi
     if (!file) return NextResponse.json({ error: "File wajib" }, { status: 400 });
 
-    // Convert ke Buffer & Base64 (Penting buat AI)
+    // Convert ke Buffer
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
-    const base64Image = buffer.toString("base64");
-
-    // Hitung Hash (Untuk Blockchain nanti)
+    
+    // Hitung Hash
     const fileHash = crypto.createHash("sha256").update(buffer).digest("hex");
     const formattedHash = `0x${fileHash}`;
-    console.log(`✅ [2.1] File Hash: ${formattedHash}`);
+    console.log(`✅ [2.1] Hash: ${formattedHash}`);
 
-    // --- STEP 2.2: AI EXTRACTION (GEMINI FLASH) ---
-    // Default value kalau AI gagal/skip
+    // --- STEP 2.2: AI EXTRACTION ---
     let extractedData = {
       vendorName: "Unknown Vendor",
       amount: 0,
       date: new Date().toISOString().split('T')[0],
       category: "Uncategorized",
-      items: [] 
+      items: []
     };
 
-    // Cek apakah Gemini aktif & file adalah gambar
+    // Convert Buffer ke Base64 untuk AI
+    const base64Image = buffer.toString("base64");
+
     if (genAI && file.type.startsWith("image/")) {
-      console.log("🤖 [2.2] Mengirim ke Gemini AI...");
-
+      console.log("🤖 [2.2] AI Processing...");
       try {
-        // Pilih Model: 'gemini-1.5-flash' lebih cepat & murah untuk OCR
+        // Pakai model Flash terbaru Anda
         const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-
-        // Prompt Rahasia untuk Struktur Data yang Konsisten
-        const prompt = `
-          Kamu adalah AI Auditor. Tugasmu mengekstrak data dari foto kwitansi ini.
-          Kembalikan HANYA dalam format JSON murni (tanpa markdown \`\`\`json).
-          Jangan ada teks pembuka/penutup.
-          
-          Struktur JSON wajib seperti ini:
-          {
-            "vendorName": "Nama Toko/Penjual",
-            "amount": 10000 (Total bayar dalam angka integer, buang Rp/titik/koma),
-            "date": "YYYY-MM-DD" (Jika tidak ada tahun, asumsikan 2025),
-            "category": "Pilih satu: Travel, Food, Office, Utilities, Others",
-            "items": [ 
-              {"itemName": "Nama Barang", "qty": 1, "price": 5000, "total": 5000} 
-            ]
-          }
-          
-          Jika gambar buram atau bukan kwitansi, kembalikan JSON dengan nilai default/kosong, JANGAN ERROR.
-        `;
-
-        // Siapkan data gambar
-        const imagePart = {
-          inlineData: {
-            data: base64Image,
-            mimeType: file.type,
-          },
-        };
-
-        // Tembak ke Google!
+        
+        const prompt = `Extract receipt data to JSON only: { "vendorName": string, "amount": number, "date": "YYYY-MM-DD", "category": string, "items": [{ "itemName": string, "qty": number, "price": number, "total": number }] }. No markdown.`;
+        
+        const imagePart = { inlineData: { data: base64Image, mimeType: file.type } };
+        
         const result = await model.generateContent([prompt, imagePart]);
-        const response = await result.response;
-        let text = response.text();
-
-        // Bersihkan format Markdown jika Gemini bandel ngasih ```json
-        text = text.replace(/```json/g, "").replace(/```/g, "").trim();
-
-        // Parse JSON string jadi Object Javascript
+        let text = result.response.text().replace(/```json|```/g, "").trim();
+        
         extractedData = JSON.parse(text);
-        console.log("✨ [2.2] Gemini Sukses Baca Data:", extractedData);
-
-      } catch (aiError) {
-        console.error("⚠️ [2.2] Gemini Gagal (Lanjut pakai data default):", aiError);
-        // Kita tidak throw error, supaya flow tetap jalan (Graceful Degradation)
+        console.log("✨ [2.2] AI Success");
+      } catch (e) {
+        console.error("⚠️ [2.2] AI Failed (Fallback Manual)");
       }
-    } else {
-      console.log("⏩ [2.2] Skip AI (File bukan gambar atau API Key kosong)");
     }
 
-    // --- (NANTI STEP 2.3 IPFS & 2.4 BLOCKCHAIN DI SINI) ---
+    // --- STEP 2.3: IPFS UPLOAD (PINATA) ---
+    console.log("☁️ [2.3] Uploading to IPFS (Pinata)...");
+    let ipfsCid = "";
+    
+    try {
+      // Siapkan FormData khusus untuk Pinata
+      const pinataData = new FormData();
+      
+      // Kita harus bungkus buffer jadi Blob agar Pinata mau terima
+      const fileBlob = new Blob([buffer], { type: file.type });
+      pinataData.append("file", fileBlob, file.name);
+
+      // Tambah Metadata (Opsional tapi bagus buat dashboard Pinata)
+      const metadata = JSON.stringify({
+        name: `Receipt ${formattedHash}`,
+        keyvalues: {
+          auditor: auditorAddress,
+          vendor: extractedData.vendorName
+        }
+      });
+      pinataData.append("pinataMetadata", metadata);
+      pinataData.append("pinataOptions", JSON.stringify({ cidVersion: 1 }));
+
+      // Tembak API Pinata
+      const pinataRes = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.PINATA_JWT}`, // Ambil dari .env
+        },
+        body: pinataData,
+      });
+
+      if (!pinataRes.ok) {
+        throw new Error(`Pinata Error: ${pinataRes.statusText}`);
+      }
+
+      const pinataJson = await pinataRes.json();
+      ipfsCid = pinataJson.IpfsHash; // INI DIA CID-NYA!
+      console.log(`📌 [2.3] IPFS CID: ${ipfsCid}`);
+
+    } catch (ipfsError) {
+      console.error("❌ [2.3] IPFS Failed:", ipfsError);
+      // Kita throw error 500 karena IPFS itu wajib buat audit trail
+      return NextResponse.json({ error: "Gagal Upload ke IPFS" }, { status: 500 });
+    }
+
+    // --- (NANTI STEP 2.4 BLOCKCHAIN DI SINI) ---
 
     return NextResponse.json({
       success: true,
-      step: "2.2 AI Extraction Selesai",
+      step: "2.3 IPFS Selesai",
       data: {
         fileName: file.name,
         fileHash: formattedHash,
         auditor: auditorAddress,
-        extracted: extractedData // <--- INI HASIL KERJA KERAS GEMINI
+        extracted: extractedData,
+        // Hasil baru Step 2.3:
+        ipfsCid: ipfsCid, 
+        ipfsUrl: `https://${process.env.PINATA_GATEWAY}/ipfs/${ipfsCid}`
       }
     });
 
