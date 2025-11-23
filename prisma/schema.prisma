@@ -1,0 +1,75 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// 1. MASTER CATEGORY
+model MsCategory {
+  CategoryId   Int         @id @default(autoincrement())
+  CategoryName String?     @db.VarChar(255)
+  CreatedAt    DateTime    @default(now())
+  UpdatedAt    DateTime    @updatedAt
+  IsDeleted    Boolean     @default(false)
+
+  Receipts     TrReceipt[]
+}
+
+// 2. USER (Login Web3)
+model User {
+  id            String      @id @default(uuid())
+  walletAddress String      @unique
+  name          String?
+  role          String      @default("AUDITOR") 
+  receipts      TrReceipt[] 
+}
+
+// 3. TRANSAKSI RECEIPT
+model TrReceipt {
+  ReceiptId       Int       @id @default(autoincrement())
+  
+  CId             String?   @db.Text
+  FileHash        String?   @db.VarChar(255)
+  TxHash          String?   @db.VarChar(255)
+  
+  VendorName      String?   @db.VarChar(255)
+  ReceiptNumber   String?   @db.VarChar(100)
+  TransactionDate DateTime?
+  
+  SubTotal        Decimal?  @db.Decimal(18, 2)
+  Ppn             Decimal?  @db.Decimal(18, 2)
+  GrandTotal      Decimal?  @db.Decimal(18, 2)
+  
+  CreatedAt       DateTime  @default(now())
+  UpdatedAt       DateTime  @updatedAt
+  IsDeleted       Boolean   @default(false)
+
+  // RELASI
+  CategoryId      Int?
+  Category        MsCategory? @relation(fields: [CategoryId], references: [CategoryId])
+
+  UserId          String?   
+  User            User?     @relation(fields: [UserId], references: [id])
+
+  ReceiptDetails  TrReceiptDetail[]
+}
+
+// 4. DETAIL ITEM
+model TrReceiptDetail {
+  ReceiptDetailId Int       @id @default(autoincrement())
+  
+  ReceiptId       Int       
+  Receipt         TrReceipt @relation(fields: [ReceiptId], references: [ReceiptId])
+  
+  ItemName        String?   @db.VarChar(255)
+  Qty             Int?
+  Price           Decimal?  @db.Decimal(18, 2)
+  Total           Decimal?  @db.Decimal(18, 2)
+  
+  CreatedAt       DateTime  @default(now())
+  UpdatedAt       DateTime  @updatedAt
+  IsDeleted       Boolean   @default(false)
+}
