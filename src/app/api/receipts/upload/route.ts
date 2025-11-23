@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { prisma } from "@/lib/prisma"; // Import prisma yang baru dibuat
 
 // Setup AI
 const genAI = process.env.GEMINI_API_KEY
@@ -18,7 +19,6 @@ export async function POST(req: NextRequest) {
 
     if (!file) return NextResponse.json({ error: "File wajib" }, { status: 400 });
 
-    // Convert ke Buffer
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
     
@@ -36,88 +36,102 @@ export async function POST(req: NextRequest) {
       items: []
     };
 
-    // Convert Buffer ke Base64 untuk AI
+    // Convert Buffer ke Base64
     const base64Image = buffer.toString("base64");
 
     if (genAI && file.type.startsWith("image/")) {
       console.log("🤖 [2.2] AI Processing...");
       try {
-        // Pakai model Flash terbaru Anda
         const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
         
+        // Prompt kita minta format amount angka murni
         const prompt = `Extract receipt data to JSON only: { "vendorName": string, "amount": number, "date": "YYYY-MM-DD", "category": string, "items": [{ "itemName": string, "qty": number, "price": number, "total": number }] }. No markdown.`;
         
         const imagePart = { inlineData: { data: base64Image, mimeType: file.type } };
-        
         const result = await model.generateContent([prompt, imagePart]);
         let text = result.response.text().replace(/```json|```/g, "").trim();
         
         extractedData = JSON.parse(text);
-        console.log("✨ [2.2] AI Success");
+        console.log("✨ [2.2] AI Success:", extractedData.vendorName);
       } catch (e) {
         console.error("⚠️ [2.2] AI Failed (Fallback Manual)");
       }
     }
 
-    // --- STEP 2.3: IPFS UPLOAD (PINATA) ---
-    console.log("☁️ [2.3] Uploading to IPFS (Pinata)...");
+    // --- STEP 2.3: IPFS UPLOAD ---
+    console.log("☁️ [2.3] Uploading to IPFS...");
     let ipfsCid = "";
     
     try {
-      // Siapkan FormData khusus untuk Pinata
       const pinataData = new FormData();
-      
-      // Kita harus bungkus buffer jadi Blob agar Pinata mau terima
       const fileBlob = new Blob([buffer], { type: file.type });
       pinataData.append("file", fileBlob, file.name);
-
-      // Tambah Metadata (Opsional tapi bagus buat dashboard Pinata)
-      const metadata = JSON.stringify({
-        name: `Receipt ${formattedHash}`,
-        keyvalues: {
-          auditor: auditorAddress,
-          vendor: extractedData.vendorName
-        }
-      });
+      
+      // Metadata sederhana
+      const metadata = JSON.stringify({ name: `Receipt ${formattedHash}` });
       pinataData.append("pinataMetadata", metadata);
       pinataData.append("pinataOptions", JSON.stringify({ cidVersion: 1 }));
 
-      // Tembak API Pinata
       const pinataRes = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.PINATA_JWT}`, // Ambil dari .env
-        },
+        headers: { Authorization: `Bearer ${process.env.PINATA_JWT}` },
         body: pinataData,
       });
 
-      if (!pinataRes.ok) {
-        throw new Error(`Pinata Error: ${pinataRes.statusText}`);
-      }
-
+      if (!pinataRes.ok) throw new Error("Pinata Upload Failed");
       const pinataJson = await pinataRes.json();
-      ipfsCid = pinataJson.IpfsHash; // INI DIA CID-NYA!
+      ipfsCid = pinataJson.IpfsHash;
       console.log(`📌 [2.3] IPFS CID: ${ipfsCid}`);
 
     } catch (ipfsError) {
-      console.error("❌ [2.3] IPFS Failed:", ipfsError);
-      // Kita throw error 500 karena IPFS itu wajib buat audit trail
-      return NextResponse.json({ error: "Gagal Upload ke IPFS" }, { status: 500 });
+      console.error("❌ [2.3] IPFS Error:", ipfsError);
+      // Lanjut saja dulu walau IPFS gagal (biar DB tetap keisi saat hackathon)
     }
 
-    // --- (NANTI STEP 2.4 BLOCKCHAIN DI SINI) ---
+    // --- STEP 2.4: MOCK BLOCKCHAIN (Sementara) ---
+    // Kita pura-pura dapat TxHash dari blockchain
+    const mockTxHash = "0x" + crypto.randomBytes(32).toString('hex');
+    console.log(`🔗 [2.4] Mock Chain Tx: ${mockTxHash}`);
 
+    // --- STEP 2.5: DATABASE SAVE (PRISMA) ---
+    console.log("💾 [2.5] Saving to MySQL Database...");
+    
+    // Kita simpan ke tabel TrReceipt
+    const newReceipt = await prisma.trReceipt.create({
+      data: {
+        FileHash: formattedHash,
+        CId: ipfsCid,
+        TxHash: mockTxHash, // Nanti diganti hash asli Lisk
+        
+        // Data dari AI
+        VendorName: extractedData.vendorName,
+        TransactionDate: new Date(extractedData.date),
+        GrandTotal: extractedData.amount,
+        SubTotal: extractedData.amount, // Asumsi simpel
+        Ppn: 0,
+        
+        // Kategori (Simpan String Langsung sesuai kesepakatan Hackathon)
+        // Atau kalau mau rapi, bisa cari ID kategori dulu. Kita tembak NULL dulu kalau ribet.
+        // Disini kita anggap CategoryId opsional / null dulu biar gak error relasi.
+        
+        UserId: null, // Bisa diisi nanti kalau sudah ada login user
+      }
+    });
+
+    console.log(`✅ [2.5] Saved to DB with ID: ${newReceipt.ReceiptId}`);
+
+    // Return Response Komplit
     return NextResponse.json({
       success: true,
-      step: "2.3 IPFS Selesai",
+      step: "All Steps Completed",
       data: {
+        receiptId: newReceipt.ReceiptId,
         fileName: file.name,
         fileHash: formattedHash,
-        auditor: auditorAddress,
+        ipfsCid: ipfsCid,
+        txHash: mockTxHash,
         extracted: extractedData,
-        // Hasil baru Step 2.3:
-        ipfsCid: ipfsCid, 
-        ipfsUrl: `https://${process.env.PINATA_GATEWAY}/ipfs/${ipfsCid}`
+        explorerUrl: `https://sepolia-blockscout.lisk.com/tx/${mockTxHash}`
       }
     });
 
