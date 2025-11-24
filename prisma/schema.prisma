@@ -7,69 +7,166 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// 1. MASTER CATEGORY
-model MsCategory {
-  CategoryId   Int         @id @default(autoincrement())
-  CategoryName String?     @db.VarChar(255)
-  CreatedAt    DateTime    @default(now())
-  UpdatedAt    DateTime    @updatedAt
-  IsDeleted    Boolean     @default(false)
-
-  Receipts     TrReceipt[]
-}
-
-// 2. USER (Login Web3)
+// 1. USER (Auditor & CFO)
 model User {
-  id            String      @id @default(uuid())
-  walletAddress String      @unique
-  name          String?
-  role          String      @default("AUDITOR") 
-  receipts      TrReceipt[] 
+  id               String     @id @default(uuid())
+  wallet_address   String     @unique // Lowercase 0x...
+  role             String     @default("auditor") // Enum: auditor, cfo
+  organization_name String?
+  created_at       DateTime   @default(now())
+  updated_at       DateTime   @updatedAt
+
+  // Relasi
+  receipts         Receipt[]
+  zk_proofs        ZKProof[]
 }
 
-// 3. TRANSAKSI RECEIPT
-model TrReceipt {
-  ReceiptId       Int       @id @default(autoincrement())
-  
-  CId             String?   @db.Text
-  FileHash        String?   @db.VarChar(255)
-  TxHash          String?   @db.VarChar(255)
-  
-  VendorName      String?   @db.VarChar(255)
-  ReceiptNumber   String?   @db.VarChar(100)
-  TransactionDate DateTime?
-  
-  SubTotal        Decimal?  @db.Decimal(18, 2)
-  Ppn             Decimal?  @db.Decimal(18, 2)
-  GrandTotal      Decimal?  @db.Decimal(18, 2)
-  
-  CreatedAt       DateTime  @default(now())
-  UpdatedAt       DateTime  @updatedAt
-  IsDeleted       Boolean   @default(false)
+// 2. KATEGORI
+model Category {
+  id          String    @id @default(uuid())
+  name        String    @unique
+  description String?   @db.Text
+  is_active   Boolean   @default(true)
+  created_at  DateTime  @default(now())
 
-  // RELASI
-  CategoryId      Int?
-  Category        MsCategory? @relation(fields: [CategoryId], references: [CategoryId])
-
-  UserId          String?   
-  User            User?     @relation(fields: [UserId], references: [id])
-
-  ReceiptDetails  TrReceiptDetail[]
+  // Relasi
+  receipts    Receipt[]
+  zk_categories ZKProofCategory[]
 }
 
-// 4. DETAIL ITEM
-model TrReceiptDetail {
-  ReceiptDetailId Int       @id @default(autoincrement())
+// 3. RECEIPTS (Data Utama)
+model Receipt {
+  id                   String    @id @default(uuid()) // PK (bisa di-custom format di API)
+  user_id              String
+  category_id          String
   
-  ReceiptId       Int       
-  Receipt         TrReceipt @relation(fields: [ReceiptId], references: [ReceiptId])
+  vendor_name          String
+  invoice_number       String?
+  receipt_date         DateTime
   
-  ItemName        String?   @db.VarChar(255)
-  Qty             Int?
-  Price           Decimal?  @db.Decimal(18, 2)
-  Total           Decimal?  @db.Decimal(18, 2)
+  subtotal             Decimal   @db.Decimal(18, 2)
+  tax_amount           Decimal   @db.Decimal(18, 2)
+  total_amount         Decimal   @db.Decimal(18, 2)
+  extracted_total      Decimal?  @db.Decimal(18, 2)
   
-  CreatedAt       DateTime  @default(now())
-  UpdatedAt       DateTime  @updatedAt
-  IsDeleted       Boolean   @default(false)
+  notes                String?   @db.Text
+  status               String    @default("pending") // pending, verified, failed
+  
+  ai_confidence_score  Float?
+  ai_confidence_reason String?   @db.Text
+  is_manually_verified Boolean   @default(false)
+  
+  created_at           DateTime  @default(now())
+  updated_at           DateTime  @updatedAt
+
+  // Relasi
+  user                 User      @relation(fields: [user_id], references: [id])
+  category             Category  @relation(fields: [category_id], references: [id])
+  
+  // Relasi 1-to-1 (Dipisah sesuai ERD baru)
+  blockchain_record    BlockchainRecord?
+  ipfs_record          IPFSRecord?
+  
+  // Relasi 1-to-Many
+  items                ReceiptItem[]
+}
+
+// 4. RECEIPT ITEMS
+model ReceiptItem {
+  id          String   @id @default(uuid())
+  receipt_id  String
+  description String
+  quantity    Int
+  unit_price  Decimal  @db.Decimal(18, 2)
+  total       Decimal  @db.Decimal(18, 2)
+  sequence    Int      @default(0)
+
+  receipt     Receipt  @relation(fields: [receipt_id], references: [id])
+}
+
+// 5. BLOCKCHAIN RECORDS (Terpisah)
+model BlockchainRecord {
+  id           String   @id @default(uuid())
+  receipt_id   String   @unique // FK Unique (1-to-1)
+  tx_hash      String
+  block_number BigInt?
+  network      String   @default("Lisk Sepolia Testnet")
+  recorded_at  DateTime @default(now())
+
+  receipt      Receipt  @relation(fields: [receipt_id], references: [id])
+}
+
+// 6. IPFS RECORDS (Terpisah)
+model IPFSRecord {
+  id          String   @id @default(uuid())
+  receipt_id  String   @unique // FK Unique (1-to-1)
+  cid         String
+  file_hash   String   // SHA-256
+  file_size   BigInt?
+  file_type   String?
+  uploaded_at DateTime @default(now())
+
+  receipt     Receipt  @relation(fields: [receipt_id], references: [id])
+}
+
+// --- ZK SECTION (Disiapkan untuk nanti) ---
+
+model ZKProof {
+  id                      String    @id @default(uuid())
+  user_id                 String
+  name                    String
+  purpose                 String?   @db.Text
+  date_range_start        DateTime
+  date_range_end          DateTime
+  proof_type              String    // between, less-than, etc
+  range_min               Decimal?  @db.Decimal(18, 2)
+  range_max               Decimal?  @db.Decimal(18, 2)
+  
+  actual_amount_encrypted Bytes?    // Blob
+  actual_amount_hash      String?
+  proof_metadata          Json?
+  
+  include_categories      Boolean   @default(false)
+  status                  String    @default("valid")
+  is_public               Boolean   @default(false)
+  proof_hash              String?
+  verification_count      Int       @default(0)
+  
+  last_verified_at        DateTime?
+  created_at              DateTime  @default(now())
+  expires_at              DateTime?
+
+  user                    User      @relation(fields: [user_id], references: [id])
+  categories              ZKProofCategory[]
+  blockchain_record       ZKProofBlockchain?
+  verification_logs       ZKVerificationLog[]
+}
+
+model ZKProofCategory {
+  id          String   @id @default(uuid())
+  zk_proof_id String
+  category_id String
+  
+  zk_proof    ZKProof  @relation(fields: [zk_proof_id], references: [id])
+  category    Category @relation(fields: [category_id], references: [id])
+}
+
+model ZKProofBlockchain {
+  id          String   @id @default(uuid())
+  zk_proof_id String   @unique
+  tx_hash     String
+  block_number BigInt?
+  recorded_at DateTime @default(now())
+
+  zk_proof    ZKProof  @relation(fields: [zk_proof_id], references: [id])
+}
+
+model ZKVerificationLog {
+  id                  String   @id @default(uuid())
+  zk_proof_id         String
+  verifier_ip_hash    String?
+  verifier_user_agent String?  @db.Text
+  verified_at         DateTime @default(now())
+
+  zk_proof            ZKProof  @relation(fields: [zk_proof_id], references: [id])
 }
